@@ -1,0 +1,76 @@
+package service
+
+import (
+	"SyncAgent/utils"
+	"fmt"
+	"sync"
+)
+
+var instance *Constants
+var mutex sync.Mutex
+
+type Constants struct {
+	Level    int    //最大统计深度
+	Path     string //要扫描的目录
+	SendFile bool   //是否发送文件
+	Console  string //console访问地址
+	TmpPath  string //临时文件存放路径
+	HostSn   string //节点唯一标识
+	IP       string //节点IP地址
+	Version  string //Agent版本
+
+	RunTime       float64                //同步线程执行间隔时间
+	Storage       map[string]interface{} //存储
+	PathMTime     map[string]int64       //源路径和最后更新时间
+	SpeedLimit    int64                  //速度限制
+	FilterType    string                 //过滤类型
+	Filters       string                 //文件过滤
+	PathPrefix    string                 //目标路径
+	Status        float64                //运行状态
+	DelTime       int64                  //源文件删除策略，-1 不删除，0立即删除，其他数字为保留天数
+	WorkStartTime string                 //工作开始时间，| 分割多组
+	WorkEndTime   string                 //工作结束时间，| 分割多组
+	HostTags      string                 //主机标签，| 分割多组
+	Workspace     string
+	MaxWorkers    int64 //最大工作线程数
+}
+
+func NewConstants() *Constants {
+	if instance == nil {
+		mutex.Lock()
+		defer mutex.Unlock()
+		if instance == nil {
+			instance = new(Constants)
+		}
+	}
+	return instance
+}
+
+func (args *Constants) Init(ipRange, console, version, workspace string) {
+	args.IP = utils.GetLocalIp(ipRange)
+	args.HostSn = utils.GetLocalHostName()
+	args.Console = console
+	args.Version = version
+	args.RunTime = 30
+	args.DelTime = -1
+	args.PathMTime = utils.ReadConfig(workspace)
+	args.Workspace = workspace
+	args.MaxWorkers = 1
+}
+func (args *Constants) InitFromArgs(ip, path, console, hostSn string, version string) {
+	args.IP = ip
+	args.Path = path
+	args.Console = console
+	args.HostSn = hostSn
+	args.Version = version
+	args.RunTime = 30
+}
+
+func (args *Constants) SetStatus(status float64) {
+	args.Status = status
+}
+
+func (args *Constants) PrintArgs() {
+	fmt.Printf("HostSn: %s\nIP: %s\nConsole: %s\nPath: %s\nLevel: %d\nTmpPath: %s\nSendFile: %t\nMaxWorkers: %d\n",
+		args.HostSn, args.IP, args.Console, args.Path, args.Level, args.TmpPath, args.SendFile, args.MaxWorkers)
+}

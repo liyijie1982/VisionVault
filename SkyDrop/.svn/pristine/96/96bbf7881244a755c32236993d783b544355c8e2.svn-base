@@ -1,0 +1,163 @@
+package service
+
+import (
+	"SyncAgent/utils"
+	"encoding/json"
+	"log"
+	"strings"
+	"sync"
+	"time"
+)
+
+var instance *Constants
+var mutex sync.Mutex
+
+type PathType struct {
+	Path string `json:"path"`
+	Type string `json:"type"`
+}
+type StorageConfig struct {
+	Name     string `json:"name"`
+	Endpoint string `json:"endpoint"`
+	AK       string `json:"ak"`
+	SK       string `json:"sk"`
+	Bucket   string `json:"bucket"`
+}
+type SyncFilter struct {
+	Filter []string `json:"filter"`
+	Type   int      `json:"type"`
+}
+type AgentTask struct {
+	Paths         []PathType    `json:"paths"`
+	Storage       StorageConfig `json:"storage"`
+	DelTime       int64         `json:"delTime"`
+	RunTime       int64         `json:"runTime"`
+	WorkStartTime string        `json:"workStartTime"` //工作开始时间，| 分割多组
+	WorkEndTime   string        `json:"workEndTime"`   //工作结束时间，| 分割多组
+	PathPrefix    string        `json:"pathPrefix"`    //目标路径
+	Status        int           `json:"status"`        //运行状态
+	Tags          string        `json:"tags"`
+	Filters       SyncFilter    `json:"filters"`
+	MaxWorkers    int           `json:"maxWorkers"`
+}
+type Constants struct {
+	Level int //最大统计深度
+	//Paths   []map[string]string //要扫描的目录
+	Console   string //console访问地址
+	TmpPath   string //临时文件存放路径
+	HostSn    string //节点唯一标识
+	IP        string //节点IP地址
+	Version   string //Agent版本
+	Workspace string
+
+	PathMTime        map[string]map[string]int64 //源路径和最后更新时间
+	PathFinishedTime map[string]map[string]int64 //源路径和上次完成时间
+
+	TaskParams AgentTask
+}
+
+type HBResponse struct {
+	Code int       `json:"code"`
+	Msg  string    `json:"msg"`
+	Data AgentTask `json:"data"`
+}
+
+func NewConstants() *Constants {
+	if instance == nil {
+		mutex.Lock()
+		defer mutex.Unlock()
+		if instance == nil {
+			instance = new(Constants)
+		}
+	}
+	return instance
+}
+
+func (args *Constants) Init(ipRange, console, version, workspace string) {
+	args.IP = utils.GetLocalIp(ipRange)
+	args.HostSn = utils.GetLocalHostName()
+	args.Console = console
+	args.Version = version
+	args.PathMTime = utils.ReadConfig(workspace)
+	args.Workspace = workspace
+}
+
+func (args *Constants) IsPause() bool {
+	if &args.TaskParams != nil {
+		return args.TaskParams.Status == 1
+	}
+	return true
+}
+func (args *Constants) FromBytes(byteData []byte) {
+	// 使用 json.Unmarshal 将 JSON 字符串解析到 person 对象中
+	log.Print("..")
+	var response HBResponse
+	err := json.Unmarshal(byteData, &response)
+	if err != nil {
+		log.Fatal("Error parsing JSON: ", err)
+	} else {
+		args.TaskParams = response.Data
+	}
+}
+func (args *Constants) PrintArgs() {
+	//log.Printf("HostSn: %s\nIP: %s\nConsole: %s\nPaths: %d\nLevel: %d\nTmpPath: %s\nSendFile: %t\nMaxWorkers: %d\n",
+	//	args.HostSn, args.IP, args.Console, len(args.Paths), args.Level, args.TmpPath, args.SendFile, args.MaxWorkers)
+}
+
+func (args *Constants) AddPathFinishedTime(pathType PathType) {
+	if args.PathFinishedTime == nil {
+		args.PathFinishedTime = make(map[string]map[string]int64)
+	}
+	if args.PathFinishedTime[pathType.Type] == nil {
+		args.PathFinishedTime[pathType.Type] = make(map[string]int64)
+	}
+	args.PathFinishedTime[pathType.Type][pathType.Path] = time.Now().Unix()
+}
+
+func (args *Constants) IsPathWorkTime(pathType PathType) bool {
+	value, ok := args.PathFinishedTime[pathType.Type]
+	if ok {
+		upFinishTime, ok1 := value[pathType.Path]
+		if !ok1 {
+			return true
+		} else {
+			return time.Now().Unix()-upFinishTime > args.TaskParams.RunTime
+		}
+	}
+	return true
+}
+func (args *Constants) HasFilter(path string) bool {
+
+	if &NewConstants().TaskParams == nil || &NewConstants().TaskParams.Filters == nil { //没有设置过滤
+		return false //返回false表示不过滤要继续上传
+	}
+
+	filterType := NewConstants().TaskParams.Filters.Type
+
+	filtersArray := NewConstants().TaskParams.Filters.Filter
+	if filterType == 1 { //白名单
+		return whiteListFilter(filtersArray, path)
+	} else { //否则是黑名单
+		return blackListFilter(filtersArray, path)
+	}
+}
+
+// WhiteListFilter 白名单验证，只要文件后缀在白名单中包含就要上传
+func whiteListFilter(filtersArray []string, path string) bool {
+	for _, _suffix := range filtersArray {
+		if strings.HasSuffix(path, _suffix) { //白名单：filter不包含的不上传
+			return false //返回false表示不过滤要继续上传
+		}
+	}
+	return true
+}
+
+// BlackListFilter 黑名单验证，只要文件后缀在黑名单中包含就要被过滤掉
+func blackListFilter(filtersArray []string, path string) bool {
+	for _, _suffix := range filtersArray {
+		if strings.HasSuffix(path, _suffix) { //黑名单：filter包含的不上传
+			return true //返回true表示被过滤掉
+		}
+	}
+	return false
+}

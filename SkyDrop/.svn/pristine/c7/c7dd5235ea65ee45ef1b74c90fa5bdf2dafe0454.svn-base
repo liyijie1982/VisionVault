@@ -1,0 +1,203 @@
+package service
+
+import (
+	"SyncAgent/utils"
+	"archive/tar"
+	"fmt"
+	"io"
+	"io/fs"
+	"log"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+)
+
+func hasFilter(path string) bool {
+	filterType := NewConstants().FilterType
+	filters := NewConstants().Filters
+	if filters == "" { //没有设置过滤
+		return false //返回false表示不过滤要继续上传
+	}
+	filtersArray := strings.Split(filters, ",")
+	if filterType == "1" { //前缀包含“~”，说明是白名单
+		return whiteListFilter(filtersArray, path)
+	} else { //否则是黑名单
+		return blackListFilter(filtersArray, path)
+	}
+}
+
+// 白名单验证，只要文件后缀在白名单中包含就要上传
+func whiteListFilter(filtersArray []string, path string) bool {
+	for _, _suffix := range filtersArray {
+		if strings.HasSuffix(path, _suffix) { //白名单：filter不包含的不上传
+			return false //返回false表示不过滤要继续上传
+		}
+	}
+	return true
+}
+
+// 黑名单验证，只要文件后缀在黑名单中包含就要被过滤掉
+func blackListFilter(filtersArray []string, path string) bool {
+	for _, _suffix := range filtersArray {
+		if strings.HasSuffix(path, _suffix) { //黑名单：filter包含的不上传
+			return true //返回true表示被过滤掉
+		}
+	}
+	return false
+}
+
+func scanDirAndSendTask(srcRootPath, currentPath string, fileQueues chan<- SyncFileInfo) error {
+	infos, err := utils.ReadSubDir(currentPath)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	for _, info := range infos {
+		_filePath := filepath.Join(currentPath, info.Name())
+		if info.IsDir() {
+			_ = scanDirAndSendTask(srcRootPath, _filePath, fileQueues)
+		} else {
+			if !hasFilter(_filePath) {
+				//sys := info.Sys()
+				//stat := sys.(*syscall.Stat_t)
+				fileQueues <- SyncFileInfo{
+					Path:       _filePath,
+					Size:       info.Size(),
+					ChangeTime: info.ModTime().Unix(), //stat.Ctim.Sec,
+				}
+			} else {
+				log.Printf("File is filtered. %s\n", _filePath)
+			}
+		}
+	}
+	return nil
+}
+
+func ScanFileAndSendTask(srcRootPath, currentPath string, fileQueues chan<- SyncFileInfo) {
+	defer func() {
+		close(fileQueues)
+	}()
+
+	_ = scanDirAndSendTask(srcRootPath, currentPath, fileQueues)
+
+	log.Println("ScanFileAndSendTask finished.")
+}
+
+var scanDirToken = make(chan struct{}, 20) //扫描目录并发限制
+func readSubDir(path string) ([]os.FileInfo, error) {
+	defer func() {
+		<-scanDirToken
+	}()
+
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	dirs, err := f.Readdir(-1)
+	if err != nil {
+		return nil, err
+	}
+
+	return dirs, nil
+}
+func ScanFileAndSendTask2(srcRootPath, currentPath string, statQueues chan<- SyncFileRlt, waitGroup *sync.WaitGroup) {
+	defer waitGroup.Done()
+
+	scanDirToken <- struct{}{} //占位扫描目录
+	infos, err := readSubDir(currentPath)
+	if err != nil {
+		log.Println(err.Error())
+	}
+
+	var tarFile *os.File
+	var tarBall *tar.Writer
+
+	tarNum := 0
+	var tmpTarSize int64
+	var stat SyncFileRlt
+	for _, info := range infos {
+		_filePath := filepath.Join(currentPath, info.Name())
+		if info.IsDir() {
+			waitGroup.Add(1)
+			go ScanFileAndSendTask2(srcRootPath, _filePath, statQueues, waitGroup)
+		} else if !hasFilter(_filePath) {
+			if tmpTarSize >= 100*1024*1024 {
+				//finish
+				tarBall.Close()
+				tarFile.Close()
+				tmpTarSize = 0
+				tarNum++
+			}
+
+			if tmpTarSize == 0 {
+				//create
+				tarName := fmt.Sprintf("%s_%d.tar", filepath.Base(currentPath), tarNum)
+				target := getDstTarPath(srcRootPath, currentPath, tarName)
+				tarFile, err = os.Create(target)
+				if err != nil {
+					return
+				}
+
+				tarBall = tar.NewWriter(tarFile)
+			}
+
+			//add
+			tmpTarSize = tmpTarSize + info.Size()
+			err = writeTar(tarBall, _filePath, info)
+			if err != nil {
+				log.Println(err.Error())
+				//stat.ErrCount++
+			} else {
+				//stat.FileCount++
+				stat.FileSize += info.Size()
+			}
+		}
+	}
+
+	if tmpTarSize > 0 {
+		tarBall.Close()
+		tarFile.Close()
+	}
+
+	statQueues <- stat
+}
+
+func getDstTarPath(srcRootPath, srcParentPath, name string) string {
+	pathPrefix := NewConstants().PathPrefix
+
+	bucket, okBucket := NewConstants().Storage["bucket"].(string)
+	if !okBucket {
+		bucket = ""
+	}
+
+	rootPath := srcRootPath
+	if utils.IsWindows() {
+		rootPath = strings.Replace(srcRootPath, "/", "\\", -1)
+	}
+	dstPath := strings.Replace(srcParentPath, rootPath, pathPrefix, 1)
+
+	return filepath.Join(bucket, dstPath, name)
+}
+
+func writeTar(tarBall *tar.Writer, _filePath string, info fs.FileInfo) error {
+	header, err := tar.FileInfoHeader(info, info.Name())
+	if err != nil {
+		return err
+	}
+
+	if err := tarBall.WriteHeader(header); err != nil {
+		return err
+	}
+
+	file, err := os.Open(_filePath)
+	if err != nil {
+		return err
+	}
+	defer file.Close()
+	_, err = io.Copy(tarBall, file)
+	return err
+}

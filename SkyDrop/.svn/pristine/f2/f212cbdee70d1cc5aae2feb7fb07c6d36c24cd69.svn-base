@@ -1,0 +1,152 @@
+package service
+
+import (
+	"SyncAgent/utils"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"time"
+)
+
+func BackendHbWork() {
+
+	for {
+		err := Heartbeat()
+		if err != nil {
+			fmt.Println(err.Error())
+		}
+
+		time.Sleep(time.Duration(10) * time.Second)
+	}
+}
+
+func Heartbeat() error {
+
+	cpuMemInfo := utils.GetCpuMem()
+	storageInfos := utils.GetStorageInfo()
+
+	reqParam := RequestParam{
+		HostSn:      NewConstants().HostSn,
+		Ip:          NewConstants().IP,
+		Version:     NewConstants().Version,
+		Cpu:         cpuMemInfo.CPU,
+		Mem:         cpuMemInfo.Mem,
+		StorageInfo: storageInfos,
+	}
+	return postHeartbeat(reqParam)
+}
+
+type RequestParam struct {
+	HostSn      string          `json:"hostSn"`
+	Ip          string          `json:"ip"`
+	Version     string          `json:"version"`
+	Cpu         float64         `json:"cpu"`
+	Mem         float64         `json:"mem"`
+	StorageInfo []utils.Storage `json:"storage"`
+}
+
+func postHeartbeat(postParam RequestParam) error {
+
+	// json.Marshal
+	reqParam, err := json.Marshal(postParam)
+	if err != nil {
+		log.Printf("Marshal RequestParam fail, err:%v\n", err)
+		return err
+	}
+
+	url := NewConstants().Console + "/prod-api/agent/heartbeat"
+	jsonData, err := utils.PostHttp(url, string(reqParam))
+	if err != nil {
+		log.Printf("http post fail, err:%v", err)
+		return err
+	}
+
+	data, ok := jsonData["data"].(map[string]interface{})
+	if !ok {
+		return errors.New("api error")
+	}
+
+	status, ok := data["status"].(float64)
+	if !ok {
+		status = 0
+	}
+	NewConstants().Status = status
+
+	runTime, ok := data["runTime"].(float64)
+	if !ok {
+		runTime = 30
+	}
+	NewConstants().RunTime = runTime
+
+	delTime, ok := data["delTime"].(float64)
+	if !ok {
+		delTime = -1
+	}
+	_delTime := int64(delTime)
+	if _delTime != -1 {
+		_delTime = _delTime * 3600 * 24
+	}
+	NewConstants().DelTime = _delTime
+
+	storage, ok := data["storage"].(map[string]interface{})
+	if !ok {
+		return nil
+	}
+	NewConstants().Storage = storage
+
+	speedLimit, ok := data["speedLimit"].(float64)
+	if !ok {
+		speedLimit = 0
+	}
+	NewConstants().SpeedLimit = int64(speedLimit)
+	NewConstants().MaxWorkers = 1
+	if NewConstants().SpeedLimit > 20 {
+		NewConstants().MaxWorkers = NewConstants().SpeedLimit / 20
+	}
+
+	filterType, ok := data["filterType"].(string)
+	if !ok {
+		filterType = "2"
+	}
+	NewConstants().FilterType = filterType
+
+	filters, ok := data["filters"].(string)
+	if !ok {
+		filters = ""
+	}
+	NewConstants().Filters = filters
+
+	pathPrefix, ok := data["pathPrefix"].(string)
+	if !ok {
+		pathPrefix = ""
+	}
+	NewConstants().PathPrefix = pathPrefix
+
+	path, ok := data["path"].(string)
+	if !ok {
+		path = ""
+	}
+	NewConstants().Path = path
+
+	tags, ok := data["tags"].(string)
+	if !ok {
+		tags = ""
+	}
+	NewConstants().HostTags = tags
+
+	workStartTime, ok := data["workStartTime"].(string)
+	if !ok {
+		workStartTime = ""
+	}
+	NewConstants().WorkStartTime = workStartTime
+
+	workEndTime, ok := data["workEndTime"].(string)
+	if !ok {
+		workEndTime = ""
+	}
+	NewConstants().WorkEndTime = workEndTime
+
+	NewConstants().PrintArgs()
+	return nil
+}

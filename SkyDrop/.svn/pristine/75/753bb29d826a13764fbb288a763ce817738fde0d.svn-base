@@ -1,0 +1,70 @@
+package service
+
+import (
+	"SyncAgent/utils"
+	"log"
+	"path/filepath"
+)
+
+func scanDirAndSendTask(srcRootPath, currentPath string, fileQueues chan<- SyncFileInfo) error {
+	infos, err := utils.ReadSubDir(currentPath)
+	if err != nil {
+		log.Println(err)
+		return err
+	}
+
+	for _, info := range infos {
+		_filePath := filepath.Join(currentPath, info.Name())
+		if info.IsDir() {
+			_ = scanDirAndSendTask(srcRootPath, _filePath, fileQueues)
+		} else {
+			if !NewConstants().HasFilter(_filePath) {
+				//sys := info.Sys()
+				//stat := sys.(*syscall.Stat_t)
+				fileQueues <- SyncFileInfo{
+					Path:       _filePath,
+					Size:       info.Size(),
+					ChangeTime: info.ModTime().Unix(), //stat.Ctim.Sec,
+				}
+			} else {
+				log.Printf("File is filtered. %s\n", _filePath)
+			}
+		}
+	}
+	return nil
+}
+
+func ScanFileAndSendTask(srcRootPath, currentPath string, fileQueues chan<- SyncFileInfo) {
+	defer func() {
+		close(fileQueues)
+	}()
+
+	_ = scanDirAndSendTask(srcRootPath, currentPath, fileQueues)
+
+	log.Println("ScanFileAndSendTask finished.")
+}
+
+func ReadLocalFolder(path string) ([]utils.Storage, error) {
+
+	if path == "/" && utils.IsWindows() { //windows root
+		return utils.GetStorageInfo(), nil
+	} else {
+		if !utils.IsWindows() {
+			path = "/" + path
+		}
+		dir, err := utils.ReadSubDir(path)
+		if err != nil {
+			return nil, err
+		} else {
+			var localFiles []utils.Storage
+			for _, info := range dir {
+				if !info.IsDir() {
+					continue
+				}
+				_filepath := filepath.Join(path, info.Name())
+				localFiles = append(localFiles, utils.Storage{Name: _filepath})
+			}
+			return localFiles, nil
+		}
+	}
+}

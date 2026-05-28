@@ -1,0 +1,83 @@
+package service
+
+import (
+	"SyncAgent/utils"
+	"log"
+	"strings"
+	"time"
+)
+
+const SYNC = "sync"
+const SCAN = "scan"
+
+func BackendWorker() {
+
+	log.Println("Start BackendWorker")
+	for {
+		log.Println("Start BackendWorker ...")
+		if !NewConstants().IsPause() && isWorkTime() {
+			srcPaths := NewConstants().TaskParams.Paths
+			log.Printf("Start srcPath.. %s\n", srcPaths)
+
+			for _, itemPath := range srcPaths {
+				if itemPath.Path == "" || !NewConstants().IsPathWorkTime(itemPath) { //未设置监听目录
+					continue
+				}
+
+				log.Printf("Start srcPath %s: %s\n", itemPath.Type, itemPath.Path)
+				newStartTime := time.Now().Unix()
+				var err error
+				if itemPath.Type == SYNC {
+					err = FileSyncTask(NewConstants().TaskParams.Storage, itemPath.Path, NewConstants().TaskParams.MaxWorkers)
+				} else if itemPath.Type == SCAN {
+					err = FileScanTask(itemPath.Path)
+				}
+
+				if err == nil {
+					NewConstants().AddPathMTime(itemPath, newStartTime)
+				} else {
+					log.Printf("[%s] %s, Error: %s\n", itemPath.Type, itemPath.Path, err.Error())
+				}
+				NewConstants().AddPathFinishedTime(itemPath)
+			}
+		}
+
+		time.Sleep(10 * time.Second)
+	}
+}
+
+func isWorkTime() bool {
+	if &NewConstants().TaskParams == nil {
+		return false
+	}
+
+	strWorkStartTime := NewConstants().TaskParams.WorkStartTime
+	strWorkEndTime := NewConstants().TaskParams.WorkEndTime
+	if strWorkStartTime == "" || strWorkEndTime == "" { //没有限制工作时间
+		return true
+	}
+
+	workStartTimes := strings.Split(strWorkStartTime, "|")
+	workEndTimes := strings.Split(strWorkEndTime, "|")
+
+	currentUnixTime := time.Now().Unix()
+
+	for index, _startTime := range workStartTimes {
+		_endTime := workEndTimes[index]
+		_workStartTime := utils.GetCurrentUnixTime(_startTime)
+		_workEndTime := utils.GetCurrentUnixTime(_endTime)
+
+		if _workStartTime > _workEndTime { //跨天
+			if currentUnixTime > _workStartTime || currentUnixTime < _workEndTime {
+				return true
+			}
+		} else if _workStartTime < _workEndTime { //同一天
+			if currentUnixTime < _workEndTime && currentUnixTime > _workStartTime {
+				return true
+			}
+		}
+
+	}
+
+	return true
+}

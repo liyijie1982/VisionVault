@@ -1,0 +1,1 @@
+CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build -o .\SyncAgent-install\SyncAgent-1.7.6 .

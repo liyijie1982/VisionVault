@@ -1,0 +1,314 @@
+package service
+
+import (
+	"SyncAgent/utils"
+	"archive/zip"
+	"container/list"
+	"errors"
+	"fmt"
+	"io"
+	"log"
+	"math"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/aws/aws-sdk-go/aws"
+	"github.com/aws/aws-sdk-go/aws/credentials"
+	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/s3/s3manager"
+)
+
+const (
+	TmpPath = ".\\tmp\\"
+)
+
+func S3Conn(endPoint, accessKey, secretKey string) (*session.Session, error) {
+	log.Printf("endPoint: %s", endPoint)
+	log.Printf("ak: %s, sk: %s", accessKey, "******")
+
+	return session.NewSession(&aws.Config{
+		Credentials:      credentials.NewStaticCredentials(accessKey, secretKey, ""),
+		Endpoint:         aws.String(endPoint),
+		Region:           aws.String("us-east-1"),
+		DisableSSL:       aws.Bool(true),
+		S3ForcePathStyle: aws.Bool(true), //virtual-host style方式，不要修改
+	})
+}
+
+func InitS3Conn(storage map[string]interface{}) (*session.Session, error) {
+	endpoint, okEndpoint := storage["endpoint"].(string)
+	if !okEndpoint {
+		return nil, errors.New(fmt.Sprintf("data get endpoint: %t\n", okEndpoint))
+	}
+	ak, okAk := storage["ak"].(string)
+	if !okEndpoint {
+		return nil, errors.New(fmt.Sprintf("data get ak: %t\n", okAk))
+	}
+	sk, okSk := storage["sk"].(string)
+	if !okSk {
+		return nil, errors.New(fmt.Sprintf("data get sk: %t\n", okSk))
+	}
+
+	s3Session, err := S3Conn(endpoint, ak, sk)
+	if err != nil {
+		log.Println(err.Error())
+		return nil, err
+	}
+	return s3Session, nil
+}
+
+func S3UploadWorker(fileQueues chan SyncFileInfo,
+	syncFileRlt chan SyncFileRlt,
+	s3Session *session.Session,
+	bucket string,
+	srcRootPath string, waitUploadWorker *sync.WaitGroup) {
+
+	defer func() {
+		waitUploadWorker.Done()
+	}()
+
+	uploader := s3manager.NewUploader(s3Session, func(u *s3manager.Uploader) {
+		// Define a strategy that will buffer 25 MiB in memory
+		u.BufferProvider = s3manager.NewBufferedReadSeekerWriteToPool(50 * 1024 * 1024)
+		u.PartSize = NewConstants().SpeedLimit * 1024 * 1024 // 10MB per part
+		u.Concurrency = 1                                    //并发
+	})
+
+	delTime := NewConstants().DelTime
+	lastCreateTime := NewConstants().PathMTime[srcRootPath]
+
+	//统计扫描结果信息
+	for file := range fileQueues {
+		cTime := file.ChangeTime
+		if cTime < lastCreateTime {
+			if delTime >= 0 && (delTime == 0 || cTime+delTime <= time.Now().Unix()) {
+				_ = os.Remove(file.Path)
+			}
+		} else {
+			fileChangeTime := time.Unix(cTime, 0)
+			strChangeTime := fileChangeTime.Format("2006-01-02 15:04:05")
+
+			err := s3UploadFile(srcRootPath, bucket, file.Path, strChangeTime, uploader)
+			syncFileRlt <- SyncFileRlt{
+				Path:       file.Path,
+				FileSize:   file.Size,
+				Err:        err,
+				ChangeTime: strChangeTime,
+			}
+		}
+	}
+}
+
+func formatFileSize(size int64) string {
+	units := []string{"B", "KB", "MB", "GB", "TB", "PB", "EB", "ZB", "YB"}
+	base := int64(1024)
+	if size < base {
+		return fmt.Sprintf("%d %s", size, units[0])
+	}
+	unitIndex := int(math.Log(float64(size)) / math.Log(float64(base)))
+	formattedSize := float64(size) / math.Pow(float64(base), float64(unitIndex))
+	return fmt.Sprintf("%.2f %s", formattedSize, units[unitIndex])
+}
+
+func createUploadZip(srcRootPath, newParentPath, bucket string, zipFileList *list.List, uploader *s3manager.Uploader) {
+	filename := "archive_" + utils.GetMillisecond()
+	log.Printf("upload zip file: %s, %s, %d\n", newParentPath, filename, zipFileList.Len())
+
+	zipName := "tmp/" + filename + ".tar"
+
+	log.Println("zipName", zipName)
+	err := createZipFile(zipName, filename, zipFileList)
+	if err != nil {
+		log.Println(err.Error())
+	}
+
+	listName := "tmp/" + filename + ".list"
+
+	log.Println("listName", listName)
+	err = createListFile(listName, filename, zipFileList)
+	if err != nil {
+		log.Println(err.Error())
+	}
+
+	s3UploadZipFile(srcRootPath, newParentPath, zipName, bucket, uploader)
+	s3UploadZipFile(srcRootPath, newParentPath, listName, bucket, uploader)
+
+}
+
+func createListFile(listFileName, filename string, zipFileList *list.List) error {
+
+	file, err := os.OpenFile(listFileName, os.O_CREATE, 0666)
+	if err != nil {
+		return err
+	}
+
+	for element := zipFileList.Front(); element != nil; element = element.Next() {
+		item, _ := element.Value.(SyncFileInfo)
+		_, err := io.WriteString(file, filepath.Base(item.Path)+"\r\n")
+		if err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func createZipFile(zipName, filename string, zipFileList *list.List) error {
+
+	zipFile, err := os.Create(zipName)
+	if err != nil {
+		return err
+	}
+	defer zipFile.Close()
+
+	zipWriter := zip.NewWriter(zipFile)
+	defer zipWriter.Close()
+
+	for element := zipFileList.Front(); element != nil; element = element.Next() {
+		item, _ := element.Value.(SyncFileInfo)
+		//向 zip 文件中添加个文件
+		w, err := zipWriter.Create(filepath.Base(item.Path))
+		if err != nil {
+			return err
+		}
+		err = writeData(item.Path, w)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+func writeData(path string, w io.Writer) error {
+	// 打开待压缩的文件
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+
+	//需要压缩更多文件到压缩包的话，只需要重复第三步即可，只需要更换下文件名
+	if _, err := io.Copy(w, f); err != nil {
+		return err
+	}
+	return nil
+}
+
+func getDstPath(srcRootPath, srcParentPath, zipPath string) string {
+	pathPrefix := NewConstants().PathPrefix
+
+	rootPath := srcRootPath
+	if utils.IsWindows() {
+		rootPath = strings.Replace(srcRootPath, "/", "\\", -1)
+	}
+	dstPath := strings.Replace(srcParentPath, rootPath, pathPrefix, 1)
+	dstPath = strings.Replace(dstPath, "\\", "/", -1)
+
+	return dstPath + "/" + filepath.Base(zipPath)
+}
+
+func S3UploadLogFile(logFilePath, bucket string, s3Session *session.Session) (string, error) {
+
+	// fmt.Printf("s3UploadLogFile %s %d %d\n", logFilePath, errCount, fileCount)
+	file, err := os.Open(logFilePath)
+	if err != nil {
+		fmt.Printf("Unable to open log file %q\n", err)
+		return "", err
+	}
+	defer file.Close()
+
+	uploader := s3manager.NewUploader(s3Session, func(u *s3manager.Uploader) {
+		// Define a strategy that will buffer 25 MiB in memory
+		u.BufferProvider = s3manager.NewBufferedReadSeekerWriteToPool(50 * 1024 * 1024)
+		u.PartSize = NewConstants().SpeedLimit * 1024 * 1024 // 10MB per part
+		u.Concurrency = 1                                    //并发
+	})
+
+	logKey := "syncLogs/" + filepath.Base(logFilePath)
+	_, err = uploader.Upload(&s3manager.UploadInput{
+		Bucket: aws.String(bucket),
+		Key:    aws.String(logKey),
+		Body:   file,
+	})
+
+	if err != nil {
+		fmt.Printf("Unable to upload log %q to %q, %v\n", logFilePath, bucket, err)
+		return "", err
+	}
+
+	return logKey, nil
+}
+
+func s3UploadZipFile(srcRootPath, srcParentPath, zipPath, bucket string, uploader *s3manager.Uploader) error {
+	file, err := os.Open(zipPath)
+	if err != nil {
+		fmt.Printf("Unable to open file %q\n", err)
+		return err
+	}
+	defer func() {
+		file.Close()
+		os.RemoveAll(zipPath)
+	}()
+
+	dstPath := getDstPath(srcRootPath, srcParentPath, zipPath)
+
+	fmt.Printf("uploader.Upload 2 %s, %s\n", srcParentPath, dstPath)
+
+	fileTags := NewConstants().HostTags + "|" + strings.Replace(dstPath, "/", "|", -1)
+	myMetadata := map[string]*string{
+		"tags": &fileTags,
+	}
+
+	_, err = uploader.Upload(&s3manager.UploadInput{
+		Bucket:   aws.String(bucket),
+		Key:      aws.String(dstPath),
+		Body:     file,
+		Metadata: myMetadata,
+	}, func(u *s3manager.Uploader) {
+		u.PartSize = 4 * 1024 * 1024 * 1024 // 4G part size
+		u.LeavePartsOnError = true          // Don't delete the parts if the upload fails.
+	})
+
+	if err != nil {
+		fmt.Printf("Unable to upload %q to %q, %v\n", zipPath, bucket, err)
+		return err
+	}
+
+	return nil
+}
+
+func s3UploadFile(srcRootPath, bucket, filename, changeTime string, uploader *s3manager.Uploader) error {
+	file, err := os.Open(filename)
+	if err != nil {
+		fmt.Printf("Unable to open file %q\n", err)
+		return err
+	}
+	defer file.Close()
+	pathPrefix := NewConstants().PathPrefix
+
+	rootPath := srcRootPath
+	if utils.IsWindows() {
+		rootPath = strings.Replace(srcRootPath, "/", "\\", -1)
+	}
+	dstPath := strings.Replace(filename, rootPath, pathPrefix, 1)
+	dstPath = strings.Replace(dstPath, "\\", "/", -1)
+
+	fileTags := NewConstants().HostTags + "|" + strings.Replace(dstPath, "/", "|", -1)
+	myMetadata := map[string]*string{
+		"tags":          aws.String(url.QueryEscape(fileTags)),
+		"Last-Modified": aws.String(changeTime),
+	}
+
+	_, err = uploader.Upload(&s3manager.UploadInput{
+		Bucket:   aws.String(bucket),
+		Key:      aws.String(dstPath),
+		Body:     file,
+		Metadata: myMetadata,
+	})
+
+	return err
+}

@@ -1,0 +1,66 @@
+package service
+
+import (
+	"SyncAgent/utils"
+	"encoding/json"
+	"fmt"
+	"log"
+	"time"
+)
+
+func BackendHbWork() {
+
+	for {
+		err := Heartbeat()
+		if err != nil {
+			fmt.Println(err.Error())
+		}
+
+		time.Sleep(time.Duration(10) * time.Second)
+	}
+}
+
+func Heartbeat() error {
+
+	cpuMemInfo := utils.GetCpuMem()
+	storageInfos := utils.GetStorageInfo()
+
+	reqParam := RequestParam{
+		HostSn:      NewConstants().HostSn,
+		Ip:          NewConstants().IP,
+		Version:     NewConstants().Version,
+		Cpu:         cpuMemInfo.CPU,
+		Mem:         cpuMemInfo.Mem,
+		StorageInfo: storageInfos,
+	}
+	return postHeartbeat(reqParam)
+}
+
+type RequestParam struct {
+	HostSn      string          `json:"hostSn"`
+	Ip          string          `json:"ip"`
+	Version     string          `json:"version"`
+	Cpu         float64         `json:"cpu"`
+	Mem         float64         `json:"mem"`
+	StorageInfo []utils.Storage `json:"storage"`
+}
+
+func postHeartbeat(postParam RequestParam) error {
+
+	// json.Marshal
+	reqParam, err := json.Marshal(postParam)
+	if err != nil {
+		log.Printf("Marshal RequestParam fail, err:%v\n", err)
+		return err
+	}
+
+	url := NewConstants().Console + "/prod-api/agent/heartbeat"
+	byteData, err := utils.PostHttp(url, string(reqParam))
+	if err != nil || byteData == nil {
+		log.Printf("http post fail, err:%v", err)
+		return err
+	}
+	NewConstants().FromBytes(byteData)
+	NewConstants().PrintArgs()
+	return nil
+}

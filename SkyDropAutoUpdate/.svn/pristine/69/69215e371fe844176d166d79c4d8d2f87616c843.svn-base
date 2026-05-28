@@ -1,0 +1,217 @@
+// SyncAgentAutoUpdate project main.go
+package main
+
+import (
+	"SyncAgentAutoUpdate/utils"
+	"bytes"
+	"errors"
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"net/url"
+	"os"
+	"os/exec"
+	"time"
+)
+
+const productVersionInfo = "SyncAgentAutoUpdate 1.8.0, Copyright © 2023 Emphant Inc. 保留所有权利。"
+
+func main() {
+	help := flag.Bool("help", false, "帮助信息")
+	version := flag.String("version", "1.8.0", "当前产品版本信息")
+	workspace := flag.String("workspace", ".\\", "应用程序工作目录")
+	console := flag.String("console", "http://192.168.99.16", "console访问地址，例如: http://console.emphant.com") //"http://172.17.15.240"
+
+	// 自定义-h
+	flag.Usage = func() {
+		fmt.Println("Usage: ./SyncAgent [-console http://console.emphant.com]")
+		fmt.Println("\nOptions:")
+		flag.PrintDefaults()
+		return
+	}
+	flag.Parse()
+	if *help {
+		flag.Usage()
+		return
+	}
+
+	configVersion := utils.ReadConfig(*workspace)
+	if configVersion == "" {
+		configVersion = *version
+	}
+	log.Println("Current Version: " + configVersion)
+	backendCheckVersionWork(*console, configVersion, *workspace)
+}
+
+func backendCheckVersionWork(host, version, workspace string) {
+
+	for {
+		id, newVersion, filename, md5, err := checkVersion(host, version)
+		if err != nil {
+			log.Println(err.Error())
+		} else if version != newVersion {
+			filename = workspace + filename
+			downloadErr := downloadNewVersion(host, id, newVersion, filename, md5)
+			if downloadErr == nil {
+				log.Println("download new version success.")
+				execErr := restartSyncAgent(workspace, filename)
+				if execErr != nil {
+					log.Println(execErr.Error())
+				} else {
+					log.Println("install new version success.")
+					utils.WriteConfig(workspace, newVersion)
+					version = newVersion
+				}
+			} else {
+				log.Println(downloadErr.Error())
+			}
+		}
+		time.Sleep(time.Duration(10) * time.Second)
+	}
+}
+
+func checkVersion(host, currVersion string) (string, string, string, string, error) {
+	params := url.Values{}
+	params.Add("version", currVersion)
+	jsonData, err := utils.HttpGet(host+"/prod-api/agent/version", params.Encode())
+	if err != nil {
+		return "", "", "", "", err
+	}
+
+	data, ok := jsonData["data"].(map[string]interface{})
+	if !ok {
+		return "", "", "", "", errors.New("no new version")
+	}
+
+	id := data["id"].(string)
+	newVersion := data["version"].(string)
+	filename := data["filename"].(string)
+	md5 := data["md5"].(string)
+
+	return id, newVersion, filename, md5, nil
+}
+
+func downloadNewVersion(host, id, newVersion, filename, md5 string) error {
+	resp, err := http.Get(host + "/prod-api/agent/download?id=" + id)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+
+	out, err := os.Create(filename)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+
+	io.Copy(out, resp.Body)
+	if err != nil {
+		return err
+	}
+
+	localFileMd5, err := utils.FileMD5(filename)
+	if err != nil {
+		return err
+	}
+
+	if md5 != localFileMd5 {
+		return errors.New("md5 not match.")
+	}
+	return nil
+}
+
+func restartSyncAgent(workspace, filename string) error {
+	//".\nssm.exe stop SyncAgent"
+	_, err := RunCommand(workspace, ".\\nssm.exe", "stop", "SyncAgent")
+	if err != nil {
+		return err
+	}
+	time.Sleep(2 * time.Second)
+// 	//".\nssm.exe remove SyncAgent confirm"
+// 	_, err = RunCommand(workspace, ".\\nssm.exe", "remove", "SyncAgent", "confirm")
+// 	if err != nil {
+// 		return err
+// 	}
+// 	time.Sleep(2 * time.Second)
+// 	//".\nssm.exe install SyncAgent " + filename
+// 	_, err = RunCommand(workspace, ".\\nssm.exe", "install", "SyncAgent", filename)
+// 	if err != nil {
+// 		return err
+// 	}
+// 	time.Sleep(2 * time.Second)
+
+
+	_, err := RunCommand(workspace, "del", "SyncAgent.exe")
+	if err != nil {
+		return err
+	}
+
+	_, err := RunCommand(workspace, "rename", filename, "SyncAgent.exe")
+	if err != nil {
+		return err
+	}
+
+	//".\nssm.exe start SyncAgent"
+	_, err = RunCommand(workspace, ".\\nssm.exe", "start", "SyncAgent")
+	return err
+}
+
+func stopService() error {
+	_, err := RunCommand(workspace, ".\\nssm.exe", "stop", "SyncAgent")
+	if err != nil {
+		return err
+	}
+}
+
+func startService() error {
+	_, err := RunCommand(workspace, ".\\nssm.exe", "start", "SyncAgent")
+	if err != nil {
+		return err
+	}
+}
+
+func restartService() error {
+
+	err := stopService()
+	if err != nil {
+		return err
+	}
+	time.Sleep(2 * time.Second)
+	return startService()
+}
+
+func resetService() error {
+
+	err := stopService()
+	if err != nil {
+		return err
+	}
+	time.Sleep(2 * time.Second)
+	err := os.Remove(".\\config.ini")
+	if err != nil {
+		// 处理错误
+		fmt.Println("删除文件时出错：", err)
+		return err
+	}
+	return startService()
+}
+
+func RunCommand(path, name string, arg ...string) (msg string, err error) {
+	cmd := exec.Command(name, arg...)
+	var out bytes.Buffer
+	var stderr bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &stderr
+	cmd.Dir = path
+	err = cmd.Run()
+	log.Println(cmd.Args)
+	if err != nil {
+		msg = fmt.Sprint(err) + ": " + stderr.String()
+		err = errors.New(msg)
+		log.Println("err", err.Error(), "cmd", cmd.Args)
+	}
+	log.Println(out.String())
+	return
+}

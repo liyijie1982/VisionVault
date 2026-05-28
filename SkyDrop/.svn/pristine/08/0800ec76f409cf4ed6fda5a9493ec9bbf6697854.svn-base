@@ -1,0 +1,4 @@
+.\nssm.exe stop SyncAgent
+.\nssm.exe remove SyncAgent confirm
+.\nssm.exe stop SyncAgentAutoUpdate
+.\nssm.exe remove SyncAgentAutoUpdate confirm

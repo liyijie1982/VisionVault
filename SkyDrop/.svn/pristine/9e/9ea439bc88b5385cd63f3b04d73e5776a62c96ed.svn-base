@@ -1,0 +1,5 @@
+.\nssm.exe install SyncAgent %cd%\SyncAgent.bat
+.\nssm.exe install SyncAgentAutoUpdate %cd%\SyncAgentAutoUpdate.bat
+
+.\nssm.exe start SyncAgent
+.\nssm.exe start SyncAgentAutoUpdate

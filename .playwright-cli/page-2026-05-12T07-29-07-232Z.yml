@@ -1,0 +1,47 @@
+- generic [ref=e4]:
+  - generic [ref=e5]:
+    - generic [ref=e6]:
+      - img "SkyView logo" [ref=e7]
+      - generic [ref=e8]:
+        - generic [ref=e9]: Industrial Visual Data Hub
+        - heading "VisionVault" [level=1] [ref=e10]
+    - generic [ref=e11]:
+      - generic [ref=e12]: Full Lifecycle Management for Industrial Visual Data
+      - paragraph [ref=e13]: Covering image acquisition, archival workflows, and intelligent retrieval, built with high reliability, strong security, and end-to-end traceability for critical factory visual assets.
+    - generic [ref=e14]:
+      - generic [ref=e15]:
+        - generic [ref=e16]: Unified Archiving
+        - generic [ref=e17]: Consolidate files from multiple sources into a clear and structured retention system.
+      - generic [ref=e18]:
+        - generic [ref=e19]: Automated Sync
+        - generic [ref=e20]: Enable continuous collection on the Agent side to reduce manual effort and transmission risks.
+      - generic [ref=e21]:
+        - generic [ref=e22]: Security Audit
+        - generic [ref=e23]: Combine log tracing and alert coordination to support daily operations and compliance needs.
+  - generic [ref=e25]:
+    - generic [ref=e26]:
+      - generic [ref=e27]: VisionVault
+      - generic [ref=e28]: Industrial Visual Data Hub
+    - generic [ref=e29]:
+      - generic [ref=e30]:
+        - generic [ref=e32]: Username
+        - textbox "Enter username" [ref=e37]: admin
+      - generic [ref=e38]:
+        - generic [ref=e40]: Password
+        - generic [ref=e44]:
+          - textbox "Enter password" [ref=e45]
+          - img [ref=e48] [cursor=pointer]
+      - generic [ref=e51]:
+        - generic [ref=e53]: Verification Code
+        - generic [ref=e57]:
+          - textbox "Enter verification code" [ref=e59]
+          - button "Verification code" [ref=e60] [cursor=pointer]:
+            - img "Verification code" [ref=e61]
+      - generic [ref=e63] [cursor=pointer]:
+        - checkbox "Remember me" [checked]
+        - img [ref=e66]
+        - generic [ref=e68]: Remember me
+      - button "Sign In" [ref=e69] [cursor=pointer]
+    - generic [ref=e70]:
+      - generic [ref=e71]: Agent package
+      - button "Download latest package" [ref=e72] [cursor=pointer]

@@ -1,0 +1,270 @@
+package service
+
+import (
+	"SyncAgent/utils"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"log"
+	"os"
+	"path/filepath"
+	"time"
+)
+
+const GCommitUrl = "/prod-api/agent/scan/commit"
+
+type FileClassify struct {
+	Path          string              `json:"path"`          //当前目录路径
+	Total         int64               `json:"total"`         //当前目录路径下所有文件总数
+	Size          int64               `json:"size"`          //当前目录路径下所有文件总大小
+	TypeSummary   map[string]FileInfo `json:"typeSummary"`   //type(后缀)
+	SizeSummary   map[string]FileInfo `json:"sizeSummary"`   //size(大小段)
+	PeriodSummary map[string]FileInfo `json:"periodSummary"` //period(时间段)
+
+	SubDirs []FileClassify `json:"subDirs"` //子目录
+}
+
+type FileInfo struct {
+	FileSize  int64 `json:"fileSize"`
+	FileCount int64 `json:"fileCount"`
+}
+
+func (fileInfo *FileInfo) Inc(delta FileInfo) {
+	fileInfo.FileSize += delta.FileSize
+	fileInfo.FileCount += delta.FileCount
+}
+
+func (summary *FileClassify) isEmpty() bool {
+	if len(summary.TypeSummary) == 0 && len(summary.SizeSummary) == 0 && len(summary.PeriodSummary) == 0 {
+		return true
+	}
+	return false
+}
+
+func (summary *FileClassify) Append(subSummary FileClassify) {
+
+	summary.SubDirs = append(summary.SubDirs, subSummary)
+	summary.Total += subSummary.Total
+	summary.Size += subSummary.Size
+
+	for typeKey, typeSummary := range subSummary.TypeSummary {
+		if summary.TypeSummary == nil {
+			summary.TypeSummary = make(map[string]FileInfo)
+		} else if value, exists := summary.TypeSummary[typeKey]; exists {
+			typeSummary.Inc(value)
+		}
+		summary.TypeSummary[typeKey] = typeSummary
+	}
+
+	for sizeKey, sizeSummary := range subSummary.SizeSummary {
+		if summary.SizeSummary == nil {
+			summary.SizeSummary = make(map[string]FileInfo)
+		} else if value, exists := summary.SizeSummary[sizeKey]; exists {
+			sizeSummary.Inc(value)
+		}
+		summary.SizeSummary[sizeKey] = sizeSummary
+	}
+
+	for periodKey, periodSummary := range subSummary.PeriodSummary {
+		if summary.PeriodSummary == nil {
+			summary.PeriodSummary = make(map[string]FileInfo)
+		} else if value, exists := summary.PeriodSummary[periodKey]; exists {
+			periodSummary.Inc(value)
+		}
+		summary.PeriodSummary[periodKey] = periodSummary
+	}
+}
+
+func (classify *FileClassify) IncType(key string, fileSize int64) {
+	if &classify.TypeSummary == nil {
+		classify.TypeSummary = make(map[string]FileInfo)
+	}
+
+	if _, exists := classify.TypeSummary[key]; exists {
+		classify.TypeSummary[key] = FileInfo{
+			FileCount: classify.TypeSummary[key].FileCount + 1,
+			FileSize:  classify.TypeSummary[key].FileSize + fileSize,
+		}
+
+	} else {
+		if classify.TypeSummary == nil {
+			classify.TypeSummary = make(map[string]FileInfo)
+		}
+		classify.TypeSummary[key] = FileInfo{
+			FileCount: 1,
+			FileSize:  fileSize,
+		}
+	}
+}
+func (classify *FileClassify) IncSize(key string, size int64) {
+	classify.Size += size
+	if &classify.SizeSummary == nil {
+		classify.SizeSummary = make(map[string]FileInfo)
+	}
+
+	if _, exists := classify.SizeSummary[key]; exists {
+		classify.SizeSummary[key] = FileInfo{
+			FileCount: classify.SizeSummary[key].FileCount + 1,
+			FileSize:  classify.SizeSummary[key].FileSize + size,
+		}
+	} else {
+		if classify.SizeSummary == nil {
+			classify.SizeSummary = make(map[string]FileInfo)
+		}
+		classify.SizeSummary[key] = FileInfo{
+			FileCount: 1,
+			FileSize:  size,
+		}
+	}
+}
+func (classify *FileClassify) IncPeriod(key string, fileSize int64) {
+	classify.Total++
+	if &classify.PeriodSummary == nil {
+		classify.PeriodSummary = make(map[string]FileInfo)
+	}
+
+	if _, exists := classify.PeriodSummary[key]; exists {
+		classify.PeriodSummary[key] = FileInfo{
+			FileCount: classify.PeriodSummary[key].FileCount + 1,
+			FileSize:  classify.PeriodSummary[key].FileSize + fileSize,
+		}
+	} else {
+		if classify.PeriodSummary == nil {
+			classify.PeriodSummary = make(map[string]FileInfo)
+		}
+		classify.PeriodSummary[key] = FileInfo{
+			FileCount: 1,
+			FileSize:  fileSize,
+		}
+	}
+}
+
+func FileScanTask(itemPath string) error {
+	defer func() { //捕获异常
+		if r := recover(); r != nil {
+			fmt.Println("发生异常:", r)
+		}
+		log.Printf("FileScanTask finished: %s \n", itemPath)
+	}()
+
+	taskStartTime := utils.GetMillisecond()
+	lastScanTime := NewConstants().PathMTime[SCAN][itemPath]
+	if time.Now().Unix()-lastScanTime >= 24*3600 {
+		return errors.New("not working time")
+	}
+
+	log.Printf("Start srcPath %s: %s\n", taskStartTime, itemPath)
+	//遍历统计
+	err, folderSummary := walkDirAndScan(itemPath)
+	if err == nil {
+		commitTjData(folderSummary, taskStartTime)
+	} else {
+		log.Printf("scan Failed %s\n", itemPath)
+	}
+	log.Printf("scan Finished %s\n", itemPath)
+
+	return err
+}
+
+func commitTjData(folderSummary FileClassify, taskStartTime string) {
+	jsonData, err := json.Marshal(folderSummary)
+	if err != nil {
+		log.Fatal("JSON marshaling failed: ", err)
+		return
+	}
+	url := fmt.Sprintf("%s%s?ip=%s&taskStartTime=%s", NewConstants().Console, GCommitUrl, NewConstants().IP, taskStartTime)
+	_, err = utils.PostHttp(url, string(jsonData))
+	if err != nil {
+		log.Println(err.Error())
+	}
+}
+
+func ReadSubDirNames(path string) ([]os.FileInfo, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+
+	dirs, err := f.Readdir(-1)
+	if err != nil {
+		return nil, err
+	}
+
+	return dirs, nil
+}
+
+// WalkDir 递归计算目录下所有文件
+func walkDirAndScan(path string) (error, FileClassify) {
+
+	currentDir := FileClassify{
+		Path:          path,
+		TypeSummary:   make(map[string]FileInfo),
+		SizeSummary:   make(map[string]FileInfo),
+		PeriodSummary: make(map[string]FileInfo),
+	}
+
+	fileInfos, err := ReadSubDirNames(path) //读取目录数据
+	if err != nil {
+		fmt.Println("walkDir ", path, err)
+		return err, currentDir
+	}
+
+	//处理当前目录下的文件和文件夹
+	for _, fileInfo := range fileInfos {
+		_filePath := filepath.Join(path, fileInfo.Name())
+		if fileInfo.IsDir() {
+			subErr, _subDirs := walkDirAndScan(_filePath)
+			if subErr == nil {
+				currentDir.Append(_subDirs)
+			}
+		} else {
+			// 统计不同类型文件数
+			extKey := extTypeKey(fileInfo.Name())
+			currentDir.IncType(extKey, fileInfo.Size())
+
+			// 统计不同文件大小段的文件数
+			sizeKey := fileSizeKey(fileInfo.Size())
+			currentDir.IncSize(sizeKey, fileInfo.Size())
+
+			// 统计不同时期创建的文件数
+			periodKey := lastAccessTimeKey(fileInfo.ModTime().Unix())
+			currentDir.IncPeriod(periodKey, fileInfo.Size())
+		}
+	}
+
+	//删除没有文件的目录记录
+	if currentDir.isEmpty() {
+		err = errors.New("current dir is empty")
+	}
+	return err, currentDir
+}
+
+func extTypeKey(filename string) string {
+	ext := filepath.Ext(filename)
+	return utils.GetFileType(ext)
+}
+
+func fileSizeKey(fileSize int64) string {
+	if fileSize > 1024*1024*1024 {
+		return "MORE1GB" //"1GB以上"
+	} else if fileSize > 100*1024*1024 {
+		return "MORE100MB" //"100MB以上"
+	} else if fileSize > 1024*1024 {
+		return "MORE1MB" //"1MB以上"
+	} else {
+		return "LESS1MB" //"1MB以内"
+	}
+}
+
+func lastAccessTimeKey(lastAccessTime int64) string {
+	if lastAccessTime < time.Now().Unix()-365*24*3600 {
+		return "MORE1YEAR" //"一年以前"
+	} else if lastAccessTime < time.Now().Unix()-182*24*3600 {
+		return "HALF1YEAR" //"半年以前"
+	} else if lastAccessTime < time.Now().Unix()-90*24*3600 {
+		return "MORE3MONTH"
+	} else {
+		return "LESS3MONTH"
+	}
+}

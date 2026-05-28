@@ -1,0 +1,5 @@
+.\nssm.exe install SyncAgent %cd%\SyncAgent-1.7.6.exe
+.\nssm.exe install SyncAgentAutoUpdate %cd%\SyncAgentAutoUpdate.exe
+
+.\nssm.exe start SyncAgent
+.\nssm.exe start SyncAgentAutoUpdate

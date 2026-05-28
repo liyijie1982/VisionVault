@@ -1,0 +1,127 @@
+package service
+
+import (
+	"SyncAgent/utils"
+	"encoding/json"
+	"fmt"
+	"io"
+	"log"
+	"net/url"
+	"os"
+	"path/filepath"
+	"strconv"
+	"sync"
+)
+
+type SyncFileInfo struct {
+	Path       string
+	Size       int64
+	ChangeTime int64
+}
+
+type SyncFileRlt struct {
+	Path       string
+	FileSize   int64
+	Err        error
+	ChangeTime string
+}
+
+func FileSyncTask(storage StorageConfig, srcRootPath string, maxWorkers int) error {
+	defer func() { //捕获异常
+		if r := recover(); r != nil {
+			fmt.Println("发生异常:", r)
+		}
+		_ = os.RemoveAll(TmpPath)
+		_ = os.Mkdir(TmpPath, 0755)
+	}()
+
+	taskStartTime := utils.GetMillisecond()
+
+	fileQueues := make(chan SyncFileInfo, maxWorkers*2) //任务队列
+	statQueues := make(chan SyncFileRlt, maxWorkers*2)  //任务队列
+
+	//目录扫描
+	log.Println("ScanFile Start ......")
+	go ScanFileAndSendTask(srcRootPath, srcRootPath, fileQueues)
+
+	var waitUploadWorker sync.WaitGroup //上传任务完成状态信号
+	for i := 0; i < maxWorkers; i++ {
+		s3Session, err := InitS3Conn(storage)
+		if err != nil {
+			return err
+		}
+
+		waitUploadWorker.Add(1)
+		go S3UploadWorker(fileQueues, statQueues, s3Session, storage.Bucket, srcRootPath, &waitUploadWorker)
+	}
+
+	go func() {
+		waitUploadWorker.Wait()
+		close(statQueues)
+		log.Println("uploadWorker finished", srcRootPath)
+	}()
+
+	return doSyncResult(statQueues, srcRootPath, taskStartTime, storage)
+}
+
+func doSyncResult(syncFileRlt chan SyncFileRlt, srcRootPath, taskStartTime string, storage StorageConfig) error {
+
+	logFileName := TmpPath + "archive_" + NewConstants().IP + "_" + filepath.Base(srcRootPath) + "_" + utils.GetMillisecond() + ".log"
+	logFile, openErr := os.OpenFile(logFileName, os.O_CREATE, 0666)
+	if openErr != nil {
+		return openErr
+	}
+	defer logFile.Close()
+
+	var fileSize, fileCount, errCount int64
+	for stat := range syncFileRlt {
+		fileSize = fileSize + stat.FileSize
+		fileCount++
+
+		errString := ""
+		if stat.Err != nil {
+			errString = stat.Err.Error()
+			errCount++
+		}
+
+		data := map[string]string{
+			"path":       stat.Path,
+			"size":       formatFileSize(stat.FileSize),
+			"changeTime": stat.ChangeTime,
+			"error":      errString,
+		}
+		jsonData, _ := json.Marshal(data)
+		_, _ = io.WriteString(logFile, string(jsonData)+"\r\n")
+	}
+
+	logPath := ""
+	if errCount > 0 || fileCount > 0 {
+		logPath, _ = uploadLogFile(logFileName, storage)
+	}
+
+	return commitTask(srcRootPath, taskStartTime, logPath, fileSize, fileCount, errCount)
+}
+
+func commitTask(srcRootPath, taskStartTime, tarListPath string, fileSize, fileCount, errCount int64) error {
+	params := url.Values{}
+	params.Add("ip", NewConstants().IP)
+	params.Add("path", srcRootPath)
+	params.Add("fileSize", strconv.FormatInt(fileSize, 10))
+	params.Add("fileCount", strconv.FormatInt(fileCount, 10))
+	params.Add("errCount", strconv.FormatInt(errCount, 10))
+	params.Add("taskStartTime", taskStartTime)
+	params.Add("tarListPath", tarListPath)
+	_, err := utils.HttpGet(NewConstants().Console+"/prod-api/agent/commit", params.Encode())
+	if err != nil {
+		log.Println(err.Error())
+	}
+	return err
+}
+
+func uploadLogFile(logFileName string, storage StorageConfig) (string, error) {
+	s3Session, err := InitS3Conn(storage)
+	if err != nil {
+		return "", err
+	}
+	return S3UploadLogFile(logFileName, storage.Bucket, s3Session)
+}

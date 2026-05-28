@@ -1,0 +1,53 @@
+package utils
+
+import (
+	"fmt"
+	"net"
+	"os"
+	"strings"
+)
+
+func GetLocalHostName() string {
+	name, err := os.Hostname()
+	if err != nil {
+		fmt.Printf("fail to get net hostname: %v\n", err)
+	}
+	return name
+}
+
+func GetLocalIp(ipRange string) (ip string) {
+
+	interfaceAddr, err := net.InterfaceAddrs()
+	if err != nil {
+		fmt.Printf("fail to get net interfaces ipAddress: %v\n", err)
+		return ip
+	}
+
+	for _, address := range interfaceAddr {
+		ipNet, isVailIpNet := address.(*net.IPNet)
+		if isVailIpNet && !ipNet.IP.IsLoopback() {
+			if ipNet.IP.To4() != nil {
+				ip = ipNet.IP.String()
+				if strings.HasPrefix(ip, ipRange) {
+					return ip
+				}
+			}
+		}
+	}
+	return ipRange
+}
+
+func GetLocalMac() (mac string) {
+	// 获取本机的MAC地址
+	interfaces, err := net.Interfaces()
+	if err != nil {
+		fmt.Println("Poor soul, here is what you got:", err.Error())
+	}
+	for _, inter := range interfaces {
+		fmt.Println(inter.Name)
+		mac := inter.HardwareAddr //获取本机MAC地址
+		fmt.Println("MAC ===== ", mac)
+	}
+	fmt.Println("MAC = ", mac)
+	return mac
+}

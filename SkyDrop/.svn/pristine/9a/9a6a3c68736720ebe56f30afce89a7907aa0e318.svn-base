@@ -1,0 +1,108 @@
+package main
+
+import (
+	"flag"
+	"fmt"
+	"io"
+	"log"
+	"net/http"
+	"strconv"
+
+	"SyncAgent/service"
+	"SyncAgent/utils"
+)
+
+const productVersionInfo = "SyncAgent 1.7.6, Copyright © 2023 Emphant Inc. 保留所有权利。"
+
+func main() {
+	help := flag.Bool("help", false, "帮助信息")
+	opType := flag.String("opType", "sync", "Agent类型 scan 或 sync")
+	version := flag.Bool("version", false, "产品版本信息")
+	workspace := flag.String("workspace", ".\\", "应用程序工作目录")
+	console := flag.String("console", "http://172.16.61.39:88", "console访问地址，例如: http://console.emphant.com") //"http://172.17.15.240"
+	ip := flag.String("ip", "192.168.6.58", "ip选择条件，例如：172.16或172.16.80")
+
+	// 自定义-h
+	flag.Usage = func() {
+		fmt.Println("Usage: ./SyncAgent [-console http://console.emphant.com]")
+		fmt.Println("\nOptions:")
+		flag.PrintDefaults()
+		return
+	}
+	flag.Parse()
+
+	service.NewConstants().Init(*ip, *console, "1.8.0", *workspace)
+	service.NewConstants().PrintArgs()
+	if *version {
+		fmt.Println("")
+		fmt.Println(productVersionInfo)
+		fmt.Println("")
+		return
+	}
+
+	if *help {
+		flag.Usage()
+		return
+	}
+
+	go service.BackendHbWork() //心跳
+
+	if *opType == "sync" {
+		go service.BackendSyncWork() //负责同步工作
+	} else if *opType == "scan" {
+		go service.BackendScanWork() //复制文件扫描
+	}
+
+	http.HandleFunc("/file", doRequest)      //   设置访问路由
+	err := http.ListenAndServe(":8765", nil) //设置监听的端口
+	if err != nil {
+		log.Fatal("ListenAndServe: ", err)
+	}
+}
+
+func doRequest(w http.ResponseWriter, r *http.Request) {
+	r.ParseForm() //解析url传递的参数，对于POST则解析响应包的主体（request body）
+
+	//注意:如果没有调用ParseForm方法，下面无法获取表单的数据
+	//query := r.URL.Query()
+	var path string // 初始化定义变量
+	if r.Method == "GET" {
+		//token = r.FormValue("token")
+		path = r.FormValue("path")
+	} else if r.Method == "POST" {
+		//token = r.PostFormValue("token")
+		path = r.PostFormValue("path")
+	}
+
+	respData := ""
+	if path == "" {
+		path = "/"
+	}
+
+	fmt.Println(path)
+
+	if path == "/" && utils.IsWindows() { //windows root
+		storages := utils.GetStorageInfo()
+		strDirs := "["
+		for _, info := range storages {
+			strDirs = strDirs + `{"name": "` + info.Name + `","total":` + strconv.FormatUint(info.Total, 10) + `,"free":` + strconv.FormatUint(info.Free, 10) + `},`
+		}
+		strDirs = strDirs + "]"
+		respData = `{"code":0, "data":` + strDirs + `}`
+	} else {
+		dir, err := utils.ReadSubDir(path)
+		if err != nil {
+			respData = `{"code":1001, "msg":"读取目录数据失败（` + err.Error() + `）"}`
+		} else {
+			strDirs := "["
+			for _, info := range dir {
+				if info.IsDir() {
+					strDirs = strDirs + "{\"name\": \"" + info.Name() + "\"},"
+				}
+			}
+			strDirs = strDirs + "]"
+			respData = `{"code":0, "data":` + strDirs + `}`
+		}
+	}
+	io.WriteString(w, respData)
+}

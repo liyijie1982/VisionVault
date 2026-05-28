@@ -1,0 +1,32 @@
+package utils
+
+import (
+	"encoding/json"
+	"fmt"
+	"io/ioutil"
+)
+
+func ReadConfig(workspace string) map[string]map[string]int64 {
+	result := make(map[string]map[string]int64)
+
+	f, err := ioutil.ReadFile(workspace + "config.ini")
+	if err != nil {
+		fmt.Println("read config failed.", err)
+		return result
+	}
+
+	//json转为map数据结构
+	_ = json.Unmarshal(f, &result)
+	return result
+}
+
+func WriteConfig(workspace string, dataMap map[string]map[string]int64) {
+	fileName := workspace + "config.ini"
+
+	bytes, _ := json.Marshal(dataMap)
+	err := ioutil.WriteFile(fileName, bytes, 0666)
+	if err != nil {
+		fmt.Println("write config failed", err)
+	}
+	fmt.Println("write config success")
+}

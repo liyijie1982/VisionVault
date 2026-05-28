@@ -1,0 +1,119 @@
+package utils
+
+import (
+	"bytes"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
+	"io/ioutil"
+	"log"
+	"mime/multipart"
+	"net/http"
+	"os"
+	"strings"
+)
+
+func HttpGet(uri, paramStr string) (map[string]interface{}, error) {
+	targetUrl := fmt.Sprintf("%s?%s", uri, paramStr)
+
+	fmt.Printf("HttpGet URL: %s\n", targetUrl)
+	resp, err := http.Get(targetUrl)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	httpStatus := strings.Trim(resp.Status, " ")
+	if httpStatus != "200" {
+		log.Printf("httpReq heartbeat: Status: %s, Body: %s\n", httpStatus, string(respBody))
+		return nil, errors.New(string(respBody))
+	}
+
+	log.Printf("httpReq heartbeat: Status: %s, Body: %s\n", httpStatus, string(respBody))
+	var jsonData map[string]interface{}
+	err = json.Unmarshal(respBody, &jsonData)
+	return jsonData, err
+}
+
+func PostFile(filename, console, hostSn, ip string) error {
+	bodyBuf := &bytes.Buffer{}
+	bodyWriter := multipart.NewWriter(bodyBuf)
+
+	fmt.Println(console, filename)
+	//关键的一步操作
+	fileWriter, err := bodyWriter.CreateFormFile("file", filename)
+	if err != nil {
+		fmt.Println("error writing to buffer")
+		return err
+	}
+
+	//打开文件句柄操作
+	fh, err := os.Open(filename)
+	if err != nil {
+		fmt.Println("error opening file")
+		return err
+	}
+	defer fh.Close()
+
+	//ioCopy
+	_, err = io.Copy(fileWriter, fh)
+	if err != nil {
+		return err
+	}
+
+	contentType := bodyWriter.FormDataContentType()
+	_ = bodyWriter.Close()
+
+	urlPath := console + "/agent/upload"
+	targetUrl := fmt.Sprintf("%s?hostSn=%s&ip=%s", urlPath, hostSn, ip)
+	fmt.Println(targetUrl)
+	resp, err := http.Post(targetUrl, contentType, bodyBuf)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	fmt.Println(resp.Status)
+	fmt.Println(string(respBody))
+	return nil
+}
+
+func PostHttp(url, jsonBodyData string) ([]byte, error) {
+
+	// 准备: HTTP请求
+	reqBody := strings.NewReader(jsonBodyData)
+	httpReq, err := http.NewRequest("POST", url, reqBody)
+	if err != nil {
+		log.Printf("NewRequest fail, url: %s, reqBody: %q, err: %v\n", url, jsonBodyData, err)
+		return nil, err
+	}
+	httpReq.Header.Add("Content-Type", "application/json")
+
+	// DO: HTTP请求
+	httpRsp, err := http.DefaultClient.Do(httpReq)
+	if err != nil || httpRsp.StatusCode != 200 {
+		status := ""
+		if httpRsp != nil {
+			status = httpRsp.Status
+		}
+		log.Printf("do http fail, url: %s, httpRsp: %s, err:%v", url, status, err)
+		return nil, err
+	}
+	defer httpRsp.Body.Close()
+
+	// Read: HTTP结果
+	rspBody, err := ioutil.ReadAll(httpRsp.Body)
+	if err != nil {
+		log.Printf("ReadAll failed, url: %s, reqBody: %q, err: %v", url, jsonBodyData, err)
+		return nil, err
+	}
+	return rspBody, err
+}
